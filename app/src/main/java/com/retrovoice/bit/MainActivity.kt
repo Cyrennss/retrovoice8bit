@@ -1,4 +1,3 @@
-
 package com.retrovoice.bit
 
 import android.Manifest
@@ -10,6 +9,7 @@ import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.PlaybackParams
 import android.os.Bundle
 import android.os.Process
 import android.graphics.Color
@@ -85,6 +85,7 @@ class MainActivity : Activity() {
                 setOnClickListener {
                     effect = name
                     selected.text = "Efek: $name"
+                    applyVoicePitch()
                 }
             })
         }
@@ -189,6 +190,7 @@ MediaRecorder.AudioSource.VOICE_COMMUNICATION,
 
             input.startRecording()
             output.play()
+            applyVoicePitch()
 
             running = true
             showStatus("🎙️ AUDIO AKTIF: $effect")
@@ -259,6 +261,26 @@ MediaRecorder.AudioSource.VOICE_COMMUNICATION,
             try { input?.release() } catch (_: Exception) {}
             try { output?.release() } catch (_: Exception) {}
             showStatus("Gagal memulai audio: ${e.message}")
+        }
+    }
+
+    private fun applyVoicePitch() {
+        val pitch = when (effect) {
+            "BLUE MEME" -> 1.35f
+            "MAFIOSO" -> 0.75f
+            "8-BIT ROBOT" -> 1.0f
+            "CHIPMUNK" -> 1.50f
+            "DEEP VOICE" -> 0.70f
+            "RETRO RADIO" -> 1.0f
+            else -> 1.0f
+        }
+
+        try {
+            playing?.playbackParams = PlaybackParams()
+                .setSpeed(1.0f)
+                .setPitch(pitch)
+        } catch (_: Exception) {
+            showStatus("Pitch tidak didukung perangkat")
         }
     }
 
