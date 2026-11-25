@@ -1,3 +1,4 @@
+
 package com.retrovoice.bit
 
 import android.Manifest
@@ -5,6 +6,7 @@ import android.app.Activity
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
@@ -30,6 +32,7 @@ class MainActivity : Activity() {
 
     private var recording: AudioRecord? = null
     private var playing: AudioTrack? = null
+    private var previousAudioMode = AudioManager.MODE_NORMAL
     private var audioThread: Thread? = null
 
     private var radioState = 0.0
@@ -139,22 +142,25 @@ class MainActivity : Activity() {
 
         val bufferBytes = maxOf(minIn, minOut, 8192) * 2
 
+        val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+        previousAudioMode = audioManager.mode
+        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+
         var input: AudioRecord? = null
         var output: AudioTrack? = null
 
         try {
             input = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
+MediaRecorder.AudioSource.VOICE_COMMUNICATION,
                 rate,
                 channelIn,
                 encoding,
                 bufferBytes
             )
-
             output = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
@@ -229,6 +235,12 @@ class MainActivity : Activity() {
                     }
                 } finally {
                     running = false
+
+                    try {
+    val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+    audioManager.mode = previousAudioMode
+} catch (_: Exception) {}
+
                     try { input.stop() } catch (_: Exception) {}
                     try { output.pause() } catch (_: Exception) {}
                     try { output.flush() } catch (_: Exception) {}
@@ -298,7 +310,11 @@ class MainActivity : Activity() {
     private fun stopVoice() {
         running = false
 
-        try { recording?.stop() } catch (_: Exception) {}
+        try {
+    val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+    audioManager.mode = previousAudioMode
+} catch (_: Exception) {}
+    try { recording?.stop() } catch (_: Exception) {}
 
         showStatus("Menghentikan audio...")
     }
