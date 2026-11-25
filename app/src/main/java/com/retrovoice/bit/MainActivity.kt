@@ -1,38 +1,42 @@
 package com.retrovoice.bit
 
-import android.app.Activity
-import android.os.Bundle
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
+import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
-import android.media.AudioManager
-import android.media.audiofx.LoudnessEnhancer
-import android.graphics.Color
-import android.graphics.Typeface
-import android.view.Gravity
-import android.widget.LinearLayout
-import android.widget.TextView
-import android.widget.ScrollView
-import android.widget.Button
-import android.widget.Toast
+import android.os.Bundle
 import android.os.Process
+import android.graphics.Color
+import android.view.Gravity
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import kotlin.concurrent.thread
-import kotlin.math.pow
+import kotlin.math.abs
+import kotlin.math.sign
 
 class MainActivity : Activity() {
-    private val cyan = Color.rgb(0, 230, 255)
-    private val purple = Color.rgb(170, 80, 255)
-    private val dark = Color.rgb(15, 10, 30)
 
     private lateinit var status: TextView
     private lateinit var selected: TextView
-    private var effect = "BLUE MEME"
+
+    @Volatile private var running = false
+    @Volatile private var effect = "BLUE MEME"
+
     private var recording: AudioRecord? = null
     private var playing: AudioTrack? = null
-    @Volatile private var running = false
+    private var audioThread: Thread? = null
+
+    private var radioState = 0.0
+
+    private val cyan = Color.rgb(0, 230, 255)
+    private val purple = Color.rgb(170, 80, 255)
+    private val dark = Color.rgb(15, 10, 30)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -50,7 +54,6 @@ class MainActivity : Activity() {
                 textSize = size
                 setTextColor(color)
                 gravity = Gravity.CENTER
-                typeface = Typeface.create("monospace", Typeface.BOLD)
                 setPadding(8, 12, 8, 12)
             }
         }
@@ -74,22 +77,22 @@ class MainActivity : Activity() {
         )
 
         effects.forEach { name ->
-            val b = Button(this).apply {
+            root.addView(Button(this).apply {
                 text = name
                 setOnClickListener {
                     effect = name
                     selected.text = "Efek: $name"
                 }
-            }
-            root.addView(b)
+            })
         }
 
-        val start = Button(this).apply {
+        root.addView(Button(this).apply {
             text = "▶ START VOICE REAL-TIME"
             setOnClickListener {
                 if (!running) {
                     if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
-                        != PackageManager.PERMISSION_GRANTED) {
+                        != PackageManager.PERMISSION_GRANTED
+                    ) {
                         requestPermissions(
                             arrayOf(Manifest.permission.RECORD_AUDIO), 100
                         )
@@ -98,14 +101,12 @@ class MainActivity : Activity() {
                     }
                 }
             }
-        }
-        root.addView(start)
+        })
 
-        val stop = Button(this).apply {
+        root.addView(Button(this).apply {
             text = "■ STOP VOICE"
             setOnClickListener { stopVoice() }
-        }
-        root.addView(stop)
+        })
 
         root.addView(label("RETRO GAMING • PIXEL SOUND", 12f, cyan))
 
@@ -114,96 +115,192 @@ class MainActivity : Activity() {
         })
     }
 
-    private fun startVoice() {
-        val rate = 44100
-        val min = AudioRecord.getMinBufferSize(
-            rate,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        )
+    private fun showStatus(message: String) {
+        runOnUiThread {
+            if (::status.isInitialized) status.text = message
+        }
+    }
 
-        if (min <= 0) {
-            status.text = "Mikrofon tidak tersedia"
+    private fun startVoice() {
+        if (running) return
+
+        val rate = 44100
+        val channelIn = AudioFormat.CHANNEL_IN_MONO
+        val channelOut = AudioFormat.CHANNEL_OUT_MONO
+        val encoding = AudioFormat.ENCODING_PCM_16BIT
+
+        val minIn = AudioRecord.getMinBufferSize(rate, channelIn, encoding)
+        val minOut = AudioTrack.getMinBufferSize(rate, channelOut, encoding)
+
+        if (minIn <= 0 || minOut <= 0) {
+            showStatus("Format audio tidak didukung")
             return
         }
 
+        val bufferBytes = maxOf(minIn, minOut, 8192) * 2
+
+        var input: AudioRecord? = null
+        var output: AudioTrack? = null
+
         try {
-            val input = AudioRecord(
+            input = AudioRecord(
                 MediaRecorder.AudioSource.MIC,
                 rate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                min * 2
+                channelIn,
+                encoding,
+                bufferBytes
             )
 
-            val output = AudioTrack(
-                AudioManager.STREAM_MUSIC,
-                rate,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                min * 2,
-                AudioTrack.MODE_STREAM
-            )
+            output = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setSampleRate(rate)
+                        .setEncoding(encoding)
+                        .setChannelMask(channelOut)
+                        .build()
+                )
+                .setBufferSizeInBytes(bufferBytes)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
 
             if (input.state != AudioRecord.STATE_INITIALIZED ||
-                output.state != AudioTrack.STATE_INITIALIZED) {
+                output.state != AudioTrack.STATE_INITIALIZED
+            ) {
                 input.release()
                 output.release()
-                status.text = "Gagal membuka audio"
+                showStatus("Gagal membuka perangkat audio")
                 return
             }
 
             recording = input
             playing = output
-            running = true
 
             input.startRecording()
             output.play()
-            status.text = "🎙️ VOICE AKTIF: $effect"
 
-            thread {
+            running = true
+            showStatus("🎙️ AUDIO AKTIF: $effect")
+
+            audioThread = thread(name = "RetroAudio") {
                 Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
-                val buffer = ShortArray(min / 2)
 
-                while (running) {
-                    val count = input.read(buffer, 0, buffer.size)
-                    if (count > 0) {
-                        for (i in 0 until count) {
-                            var sample = buffer[i].toDouble()
+                val buffer = ShortArray(1024)
+                radioState = 0.0
 
-                            sample = when (effect) {
-                                "BLUE MEME" -> (sample * 1.7).coerceIn(-26000.0, 26000.0)
-                                "MAFIOSO", "DEEP VOICE" -> sample * 1.25
-                                "CHIPMUNK" -> sample * 1.5
-                                "8-BIT ROBOT" -> (sample / 4096.0).toInt() * 4096.0
-                                "RETRO RADIO" -> (sample / 2048.0).toInt() * 2048.0
-                                else -> sample
+                try {
+                    while (running) {
+                        val count = input.read(
+                            buffer, 0, buffer.size,
+                            AudioRecord.READ_BLOCKING
+                        )
+
+                        if (count < 0) {
+                            throw IllegalStateException("Mikrofon gagal membaca audio: $count")
+                        }
+
+                        if (count == 0) continue
+
+                        processAudio(buffer, count)
+
+                        var written = 0
+                        while (written < count && running) {
+                            val result = output.write(
+                                buffer, written, count - written,
+                                AudioTrack.WRITE_BLOCKING
+                            )
+
+                            if (result < 0) {
+                                throw IllegalStateException("AudioTrack error: $result")
                             }
 
-                            buffer[i] = sample.toInt().coerceIn(-32768, 32767).toShort()
+                            if (result == 0) break
+                            written += result
                         }
-                        output.write(buffer, 0, count)
                     }
+                } catch (e: Exception) {
+                    if (running) {
+                        showStatus("Audio error: ${e.message}")
+                    }
+                } finally {
+                    running = false
+                    try { input.stop() } catch (_: Exception) {}
+                    try { output.pause() } catch (_: Exception) {}
+                    try { output.flush() } catch (_: Exception) {}
+                    input.release()
+                    output.release()
+
+                    if (recording === input) recording = null
+                    if (playing === output) playing = null
+
+                    showStatus("⏹ VOICE BERHENTI")
                 }
             }
+
         } catch (e: Exception) {
             running = false
-            status.text = "Audio error: ${e.message}"
+            try { input?.release() } catch (_: Exception) {}
+            try { output?.release() } catch (_: Exception) {}
+            showStatus("Gagal memulai audio: ${e.message}")
+        }
+    }
+
+    private fun processAudio(buffer: ShortArray, count: Int) {
+        for (i in 0 until count) {
+            val original = buffer[i].toDouble() / 32768.0
+
+            val processed = when (effect) {
+                "BLUE MEME" -> {
+                    val boosted = original * 1.7
+                    (boosted.coerceIn(-0.85, 0.85) * 32767.0)
+                }
+
+                "MAFIOSO" -> {
+                    radioState = radioState * 0.78 + original * 0.22
+                    val thick = radioState * 1.8
+                    (thick / (1.0 + abs(thick))) * 32767.0
+                }
+
+                "8-BIT ROBOT" -> {
+                    val levels = 32.0
+                    ((original * levels).toInt() / levels * 32767.0)
+                }
+
+                "CHIPMUNK" -> {
+                    (original * 1.3).coerceIn(-1.0, 1.0) * 32767.0
+                }
+
+                "DEEP VOICE" -> {
+                    (original * 0.85).coerceIn(-1.0, 1.0) * 32767.0
+                }
+
+                "RETRO RADIO" -> {
+                    radioState = radioState * 0.82 + original * 0.18
+                    val quantized = (radioState * 24.0).toInt() / 24.0
+                    quantized.coerceIn(-1.0, 1.0) * 32767.0
+                }
+
+                else -> original * 32767.0
+            }
+
+            buffer[i] = processed
+                .toInt()
+                .coerceIn(-32768, 32767)
+                .toShort()
         }
     }
 
     private fun stopVoice() {
         running = false
-        try {
-            recording?.stop()
-            recording?.release()
-            playing?.stop()
-            playing?.release()
-        } catch (_: Exception) {
-        }
-        recording = null
-        playing = null
-        status.text = "⏹ VOICE BERHENTI"
+
+        try { recording?.stop() } catch (_: Exception) {}
+
+        showStatus("Menghentikan audio...")
     }
 
     override fun onRequestPermissionsResult(
@@ -212,12 +309,14 @@ class MainActivity : Activity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
         if (requestCode == 100 &&
             grantResults.isNotEmpty() &&
-            grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            grantResults[0] == PackageManager.PERMISSION_GRANTED
+        ) {
             startVoice()
         } else {
-            status.text = "Izin mikrofon ditolak"
+            showStatus("Izin mikrofon ditolak")
         }
     }
 
